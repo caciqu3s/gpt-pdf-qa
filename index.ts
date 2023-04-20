@@ -1,32 +1,47 @@
+import { BufferMemory } from 'langchain/memory';
 import { OpenAI } from "langchain/llms/openai";
-import { initializeAgentExecutorWithOptions } from "langchain/agents";
-import { RecursiveCharacterTextSplitter } from "langchain/text_splitter";
 import { HNSWLib } from "langchain/vectorstores/hnswlib";
-import { BufferMemory } from "langchain/memory";
-import { SerpAPI, ChainTool } from "langchain/tools";
-import { ConversationalRetrievalQAChain, loadQARefineChain, RetrievalQAChain, VectorDBQAChain } from "langchain/chains";
-import { Calculator } from "langchain/tools/calculator";
+import { ConversationalRetrievalQAChain, ConversationChain, VectorDBQAChain } from "langchain/chains";
 import { OpenAIEmbeddings } from "langchain/embeddings/openai";
 import express, { Express, Request, Response } from 'express';
 import dotenv from 'dotenv';
 import actuator from 'express-actuator';
-import { getTextFromFiles } from './src/doc-reader';
-import * as fs from 'fs';
+import { DirectoryLoader } from "langchain/document_loaders/fs/directory";
+import {
+  JSONLoader,
+  JSONLinesLoader,
+} from "langchain/document_loaders/fs/json";
+import { TextLoader } from "langchain/document_loaders/fs/text";
+import { CSVLoader } from "langchain/document_loaders/fs/csv";
+import { PDFLoader } from "langchain/document_loaders/fs/pdf";
+import { SqlDatabase } from "langchain/sql_db";
+import { createSqlAgent, SqlToolkit } from "langchain/agents";
+import { DataSource } from "typeorm";
+import cors from 'cors';
+import * as path from 'path';
 
 dotenv.config();
 
 
-const model = new OpenAI({ openAIApiKey: process.env.OPENAI_API_KEY, temperature: 0.9 });
+const model = new OpenAI({ modelName: '',openAIApiKey: process.env.OPENAI_API_KEY, temperature: 0.9 });
 let vectorStore: HNSWLib;
 let chatHistory = '';
 
 async function getVectorStore() {
   // Load in the file we want to do question answering over
   //const text = fs.readFileSync("Angular-Getting-started-with-standalone-components.txt", "utf8");
-  const texts = await getTextFromFiles();
-  // Split the text into chunks
-  const textSplitter = new RecursiveCharacterTextSplitter({ chunkSize: 1000 });
-  const docs = await textSplitter.createDocuments(texts);
+
+  const loader = new DirectoryLoader(
+    path.join(__dirname, 'docs'),
+    {
+      ".json": (path) => new JSONLoader(path, "/texts"),
+      ".jsonl": (path) => new JSONLinesLoader(path, "/html"),
+      ".txt": (path) => new TextLoader(path),
+      ".csv": (path) => new CSVLoader(path),
+      ".pdf": (path) => new PDFLoader(path, { pdfjs: () => import("pdfjs-dist/legacy/build/pdf.js")}),
+    }
+  );
+  const docs = await loader.load();
   // Create the vectorstore 
   return await HNSWLib.fromDocuments(docs, new OpenAIEmbeddings());
 }
@@ -48,6 +63,7 @@ async function getTools() {
 */
 
 const app: Express = express();
+app.use(cors({ origin: 'http://localhost:4200' }));
 const port = process.env.PORT;
 
 app.use(express.json());
@@ -57,23 +73,55 @@ app.post('/prompt', async (req: Request<{}, {}, { prompt: string }>, res: Respon
 
   const chain = ConversationalRetrievalQAChain.fromLLM(
     model,
-    vectorStore.asRetriever(),
-    {
-      returnSourceDocuments: true
-    }
+    vectorStore.asRetriever()
   );
 
   const anotherChain = VectorDBQAChain.fromLLM(model, vectorStore, { returnSourceDocuments: true })
+  anotherChain.memory = new BufferMemory();
 
   console.log("Loaded agent.");
 
   const modelResponse = await chain.call({question: prompt, chat_history: chatHistory.length > 0 ? chatHistory : [] });
-  chatHistory += prompt + modelResponse.text;
+  chatHistory += `QUESTION: \n ${prompt} \n\n RESPONSE: \n ${modelResponse.text}`;
 
   //fs.writeFileSync('./response.txt', modelResponse.output_text);
 
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, PATCH, DELETE');
+  res.setHeader('Access-Control-Allow-Headers', 'X-Requested-With,content-type');
   res.status(200).send(modelResponse);
 });
+
+app.post('/prompt/sql', async (req: Request<{}, {}, { prompt: string }>, res: Response) => {
+  const { prompt } = req.body;
+
+  const datasource = new DataSource({
+    type: "mysql",
+    database: "vehicle_sales",
+    host: "localhost",
+    port: 3306,
+    username: "root",
+    password: "P@ssw0rd"
+  });
+
+  const db = await SqlDatabase.fromDataSourceParams({
+    appDataSource: datasource,
+  });
+  const toolkit = new SqlToolkit(db);
+  const model = new OpenAI({ temperature: 0 });
+  const executor = createSqlAgent(model, toolkit);
+
+  console.log("Loaded agent.");
+
+  const modelResponse = await executor.call({input: prompt });
+
+  //fs.writeFileSync('./response.txt', modelResponse.output_text);
+
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS, PUT, PATCH, DELETE');
+  res.setHeader('Access-Control-Allow-Headers', 'X-Requested-With,content-type');
+  res.status(200).send(modelResponse);
+})
 
 app.use(actuator())
 
