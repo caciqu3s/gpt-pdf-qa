@@ -23,7 +23,7 @@ import * as path from 'path';
 dotenv.config();
 
 
-const model = new OpenAI({ modelName: '',openAIApiKey: process.env.OPENAI_API_KEY, temperature: 0.9 });
+const model = new OpenAI({ openAIApiKey: process.env.OPENAI_API_KEY, temperature: 0.9 });
 let vectorStore: HNSWLib;
 let chatHistory = '';
 
@@ -108,7 +108,6 @@ app.post('/prompt/sql', async (req: Request<{}, {}, { prompt: string }>, res: Re
     appDataSource: datasource,
   });
   const toolkit = new SqlToolkit(db);
-  const model = new OpenAI({ temperature: 0 });
   const executor = createSqlAgent(model, toolkit);
 
   console.log("Loaded agent.");
